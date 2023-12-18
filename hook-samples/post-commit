@@ -1,0 +1,4 @@
+#!/bin/sh
+if [ ! -e ".git/rebase-apply" ] && [ ! -e ".git/rebase-merge" ] && [ ! -e ".git/sequencer" ]; then
+  git touch HEAD~1..HEAD -q &
+fi

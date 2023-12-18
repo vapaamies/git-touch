@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+
+"""
+    Авторские права © 2023-2024 Владислав Джавадов
+    Команды Git: http://gitcommands.cantor.systems
+"""
+
+from datetime import datetime, timedelta, timezone
+from typing import cast
+import locale
+import sys
+import os
+from time import process_time
+import argparse
+
+from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
+from pygit2 import GIT_SORT_TOPOLOGICAL, GIT_SORT_TIME, GIT_SORT_REVERSE
+from pygit2 import GIT_OBJ_TREE, GIT_OBJ_BLOB
+
+_description = '''
+Установка дат файлов и каталогов по датам из Git:
+  • файлы — дата последней фиксации, затронувшей файл (committed date)
+  • каталоги — дата первого появления в Git (authored date первой фиксации)
+'''.strip()
+_epilog = 'Команды Git: http://gitcommands.cantor.systems'
+_version = '2023.12'
+
+class Arguments(argparse.Namespace):
+  dry_run: bool
+  force: bool
+  only_dirs: bool
+  only_stats: bool
+  quiet: bool
+  rev_spec: str
+  single_rev: bool
+  touch_dirs: bool
+  verbose: bool
+
+class CommandLine(argparse.ArgumentParser):
+  def __init__(self):
+    super().__init__(add_help=False, description=_description, epilog=_epilog,
+      formatter_class=argparse.RawDescriptionHelpFormatter)
+    self.add_argument('rev_spec', nargs='?', metavar='<диапазон-ревизий>', help='введите `git help gitrevisions` для справки')
+    self.add_argument('-1', dest='single_rev', action='store_true', help='одиночная фиксация из заданной ревизии')
+    self.add_argument('-D', '--only-dirs', action='store_true', help='устанавливать только даты каталогов')
+    self.add_argument('-d', '--touch-dirs', type=int, choices=range(2), default=1, help='устанавливать даты каталогов')
+    self.add_argument('-f', '--force', action='store_true', help='безусловно устанавливать даты каталогов')
+    self.add_argument('-h', '--help', action='help', help='показать эту справку и выйти')
+    self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы и каталоги, только отобразить даты')
+    self.add_argument('-q', '--quiet', action='store_true', help='ничего не выводить в консоль')
+    self.add_argument('-s', '--only-stats', action='store_true', help="не отображать информацию о файлах и каталогах, только итоговую статистику")
+    self.add_argument('-V', '--verbose', action='store_true', help='выводить подробные даты фиксаций')
+    self.add_argument('-v', '--version', action='version', help='показать номер версии и выйти',
+      version='{} {}'.format(os.path.basename(sys.argv[0]), _version))
+
+  def parse(self) -> Arguments:
+    args = cast(Arguments, self.parse_args())
+    args.touch_dirs += args.only_dirs
+    return args
+
+class ParentPaths:
+  def __init__(self, path: str):
+    self.path = path
+  def __iter__(self):
+    self.current = os.path.dirname(self.path)
+    return self
+  def __next__(self):
+    result = self.current
+    if result == '':
+      raise StopIteration
+    self.current = os.path.dirname(self.current)
+    return result
+
+class Touchable(Repository):
+  @staticmethod
+  def snap(tree: Tree, path: str = None) -> dict:
+    pass
+
+class Dates(dict):
+  def __init__(self, source: dict, reverse: bool, who: str):
+    super().__init__()
+    for path, data in source.items():
+      if self._targeted(path):
+        self[path] = data
+    self._reverse = reverse
+    self._who = who
+
+  @staticmethod
+  def _targeted(path: str) -> bool:
+    pass
+
+  def _update(self, file: str, commit: str, date: datetime) -> int:
+    pass
+
+  def snap(self, repo: Touchable, head: Object) -> int:
+    remaining = len(self)
+    if not remaining:
+      return 0
+
+    commitCount = 0
+
+    for commit in repo.walk(head.id, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME | (GIT_SORT_REVERSE if self._reverse else 0)):
+      commitCount += 1
+      src = cast(Signature, getattr(commit, self._who))
+      date = datetime.fromtimestamp(src.time, timezone(timedelta(minutes=src.offset)))
+
+      if commit.parents:
+        for parent in commit.parents:
+          for diff in repo.diff(parent, commit).deltas:
+            if diff.status_char() != 'D':
+              remaining -= self._update(diff.new_file.path, commit.short_id, date)
+              if remaining <= 0:
+                return commitCount
+      else:
+        for path in repo.snap(commit.tree):
+          if path[-1] == '/':
+            continue
+          remaining -= self._update(path, commit.short_id, date)
+          if remaining <= 0:
+            return commitCount
+
+class FileDates(Dates):
+  def __init__(self, source: dict):
+    super().__init__(source, False, 'committer')
+
+  @staticmethod
+  def _targeted(path: str) -> bool:
+    return path[-1] != '/'
+
+  def _update(self, file: str, commit: str, date: datetime) -> int:
+    if file in self:
+      self[file] = (commit, date)
+      return 1
+    return 0
+
+class DirDates(Dates):
+  def __init__(self, source: dict):
+    super().__init__(source, True, 'author')
+
+  @staticmethod
+  def _targeted(path: str) -> bool:
+    return path[-1] == '/'
+
+  def _update(self, file: str, commit: str, date: datetime) -> int:
+    result = 0
+    for parent in ParentPaths(file):
+      path = parent + '/'
+      if path not in self:
+        break
+      if self[path] is None:
+        self[path] = (commit, date)
+        result += 1
+    return result
+
+class Target(Touchable):
+  def __init__(self, args: Arguments, path: str):
+    super().__init__(path)
+    self.args = args
+
+  def single_rev(self, head: Object) -> RevSpec:
+    return self.revparse('{0}~1..{0}'.format(head.id)) if self[head.id].parents else self.revparse(head.short_id)
+
+  def diff_paths(self, revs: RevSpec) -> dict:
+    result = {}
+
+    head = self[revs.to_object.id]
+    feet = self[revs.from_object.id]
+
+    for diff in self.diff(revs.from_object, revs.to_object).deltas:
+      if diff.status_char() != 'D':
+        path = diff.new_file.path
+        if path in head.tree:
+          if not self.args.only_dirs and os.path.exists(path):
+            result[path] = None
+          if self.args.touch_dirs:
+            for parent in ParentPaths(path):
+              path = parent + '/'
+              if path in result:
+                break
+              if path not in feet.tree and os.path.exists(path) and (self.args.force or int(os.stat(path).st_mtime) > head.author.time):
+                result[path] = None
+
+    return result
+
+  @staticmethod
+  def snap(tree: Tree, path: str = None) -> dict:
+    def joined(path: str, name: str) -> str:
+      return path + '/' + name if path else name
+
+    result = {}
+
+    for obj in tree:
+      if obj.type == GIT_OBJ_TREE:
+        result.update(Target.snap(cast(Tree, obj), joined(path, tree.name)))
+      elif obj.type == GIT_OBJ_BLOB:
+        result[joined(path, joined(tree.name, obj.name))] = None
+
+    return result
+
+  def touch(self):
+    def snap(commit: Commit) -> dict:
+      result = self.snap(commit.tree)
+
+      files = list(result)
+      if self.args.only_dirs:
+        result = {}
+      else:
+        for file in files:
+          if not os.path.exists(file):
+            del result[file]
+
+      if self.args.touch_dirs:
+        for file in files:
+          for parent in ParentPaths(file):
+            path = parent + '/'
+            if path in result:
+              break
+            if os.path.exists(path) and (self.args.force or int(os.stat(path).st_mtime) > commit.author.time):
+              result[path] = None
+
+      return result
+
+    head: Commit
+    paths: dict
+    started = process_time()
+
+    if self.args.rev_spec is not None:
+      revs = self.revparse(self.args.rev_spec)
+      if self.args.single_rev:
+        revs = self.single_rev(revs.to_object if revs.to_object is not None else revs.from_object)
+      if revs.to_object is not None:
+        paths = self.diff_paths(revs)
+        head = self[revs.to_object.id]
+      else:
+        head = self[revs.from_object.id]
+        paths = snap(head)
+    else:
+      head = self[self.head.target]
+      if self.args.single_rev:
+        paths = self.diff_paths(self.single_rev(head))
+      else:
+        paths = snap(head)
+
+    fileCount: int
+    fileCommitCount: int
+
+    if not self.args.only_dirs:
+      fileDates = FileDates(paths)
+      fileCount = len(fileDates)
+      fileCommitCount = fileDates.snap(self, head)
+      paths.update(fileDates)
+    else:
+      fileCount = 0
+      fileCommitCount = 0
+
+    dirCount: int
+    dirCommitCount: int
+
+    if self.args.touch_dirs:
+      dirDates = DirDates(paths)
+      dirCount = len(dirDates)
+      dirCommitCount = dirDates.snap(self, head)
+      paths.update(dirDates)
+    else:
+      dirCount = 0
+      dirCommitCount = 0
+
+    scanned = process_time()
+    finished = 0
+
+    if not self.args.dry_run or not (self.args.only_stats or self.args.quiet):
+      for file in sorted(paths.keys(), key=str.casefold):
+        info = paths[file]
+        if info is None:
+          continue
+        dt = cast(datetime, info[1])
+        if not self.args.dry_run:
+          ts = dt.timestamp()
+          os.utime(file, (ts, ts))
+        if not (self.args.only_stats or self.args.quiet):
+          print(
+            '{}  →  {}  ({}  ←  {})'.format(file, dt.astimezone().strftime('%x %X %z'), dt.strftime('%x %X %z'), info[0])
+              if self.args.verbose else
+            '{}  →  {}  ({})'.format(file, dt.astimezone().strftime('%x %X'), info[0])
+          )
+      finished = process_time()
+
+    if not self.args.quiet:
+      if not self.args.only_stats:
+        print()
+      stats = []
+      if not self.args.only_dirs:
+        stats.append('Файлов: {}'.format(fileCount))
+      if self.args.touch_dirs:
+        stats.append('Каталогов: {}'.format(dirCount))
+      stats.append('Фиксаций: {}'.format(
+        '{}'.format(dirCommitCount) if self.args.only_dirs else
+        '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else
+        '{}'.format(fileCommitCount)
+      ))
+      def elapsed(value: float) -> str:
+        return '{} с'.format(locale.format_string('%.4f', value))
+      stats.append(
+        '{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)) if finished else
+        elapsed(scanned - started)
+      )
+      print(' · '.join(stats))
+
+if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
+  sys.tracebacklimit = 0
+
+locale.setlocale(locale.LC_ALL, '')
+Target(CommandLine().parse(), os.getcwd()).touch() # путь для сообщения в исключении
