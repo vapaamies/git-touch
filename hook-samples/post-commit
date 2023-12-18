@@ -1,0 +1,2 @@
+#!/bin/sh
+git touch HEAD~1..HEAD -q &

@@ -1,0 +1,2 @@
+#!/bin/sh
+git touch $1..$2 -qd$3 &
