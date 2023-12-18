@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+
+"""
+    Авторские права © 2023 Владислав Джавадов
+    Команды Git: http://gitcommands.cantor.systems
+"""
+
+from datetime import datetime, timedelta, timezone
+from typing import cast
+import locale
+import sys
+import os
+from time import process_time
+import argparse
+
+from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
+from pygit2 import GIT_SORT_TOPOLOGICAL, GIT_SORT_TIME, GIT_SORT_REVERSE
+from pygit2 import GIT_OBJ_TREE, GIT_OBJ_BLOB
+
+_description = '''
+Установка дат файлов и каталогов по датам из Git:
+  • файлы — дата последней фиксации, затронувшей файл (committed date)
+  • каталоги — дата первого появления в Git (authored date первой фиксации)
+'''.strip()
+_epilog = 'Команды Git: http://gitcommands.cantor.systems'
+_version = '2023-12'
+
+class CommandLine(argparse.ArgumentParser):
+  def __init__(self):
+    super().__init__(add_help=False, description=_description, epilog=_epilog,
+      formatter_class=argparse.RawDescriptionHelpFormatter)
+    self.add_argument('revspec', nargs='?', metavar='<диапазон-ревизий>', help='введите `git help gitrevisions` для справки')
+    self.add_argument('-1', dest='single_rev', action='store_true', help='одиночная фиксация из заданной ревизии')
+    self.add_argument('-d', '--touch-dirs', type=int, choices=range(2), default=1, help='устанавливать даты каталогов')
+    self.add_argument('-h', '--help', action='store_true', help='вывести эту справку и выйти')
+    self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы, только отобразить даты')
+    self.add_argument('-q', '--quiet', action='store_true', help='ничего не выводить в консоль')
+    self.add_argument('-s', '--only-stats', action='store_true', help="не отображать информацию о файлах/каталогах, только итоговую статистику")
+    self.add_argument('-v', '--version', action='version', version='{} {}'.format(os.path.basename(sys.argv[0]), _version))
+
+  def parse(self) -> argparse.Namespace:
+    args = self.parse_args()
+    if args.help:
+      self.print_help()
+      self.exit()
+    return args
+
+class ParentPaths:
+  def __init__(self, path: str):
+    self.path = path
+  def __iter__(self):
+    self.current = os.path.dirname(self.path)
+    return self
+  def __next__(self):
+    result = self.current
+    if result == '':
+      raise StopIteration
+    self.current = os.path.dirname(self.current)
+    return result
+
+class Touchable(Repository):
+  def snap(self, tree: Tree, path: str = None) -> dict:
+    pass
+
+class Dates:
+  def __init__(self, reverse: bool, who: str):
+    self._reverse = reverse
+    self._who = who
+
+  def _update(self, paths: dict, file: str, date: datetime) -> int:
+    pass
+
+  def update(self, paths: dict, repo: Touchable, head: Object) -> int:
+    result = 0
+    remaining = len(paths)
+
+    for commit in repo.walk(head.id, GIT_SORT_TOPOLOGICAL | (GIT_SORT_TIME | GIT_SORT_REVERSE if self._reverse else 0)):
+      result += 1
+      src = cast(Signature, getattr(commit, self._who))
+      date = datetime.fromtimestamp(src.time, timezone(timedelta(minutes=src.offset)))
+
+      if commit.parents:
+        for parent in commit.parents:
+          for diff in repo.diff(parent, commit).deltas:
+            if diff.status_char() != 'D':
+              remaining -= self._update(paths, diff.new_file.path, date)
+              if remaining <= 0:
+                return result
+      else:
+        for file in repo.snap(commit.tree):
+          remaining -= self._update(paths, file, date)
+          if remaining <= 0:
+            return result
+
+class DirDates(Dates):
+  def __init__(self):
+    super().__init__(True, 'author')
+
+  def _update(self, paths: dict, file: str, date: datetime) -> int:
+    result = 0
+    for parent in ParentPaths(file):
+      path = parent + '/'
+      if path not in paths:
+        break
+      if paths[path] is None:
+        paths[path] = date
+        result += 1
+    return result
+
+class FileDates(Dates):
+  def __init__(self):
+    super().__init__(False, 'committer')
+
+  def _update(self, paths: dict, file: str, date: datetime) -> int:
+    if file in paths and paths[file] is None:
+      paths[file] = date
+      return 1
+    return 0
+
+class Target(Touchable):
+  def __init__(self, args: argparse.Namespace, path: str):
+    super().__init__(path)
+    self.args = args
+
+  def single_rev(self, head: Object) -> RevSpec:
+    return self.revparse('{0}~1..{0}'.format(head.id)) if self[head.id].parents else self.revparse(head.short_id)
+
+  def diff_files(self, revs: RevSpec) -> dict:
+    result = {}
+
+    for diff in self.diff(revs.from_object, revs.to_object).deltas:
+      if diff.status_char() != 'D':
+        file = diff.new_file.path
+        result[file] = None
+
+    actual = self.snap(self[revs.to_object.id].tree)
+    for file in result.keys():
+      if file not in actual:
+        del result[file]
+
+    return result
+
+  def snap(self, tree: Tree, path: str = None) -> dict:
+    def joined(path: str, name: str) -> str:
+      return path + '/' + name if path else name
+
+    result = {}
+
+    for obj in tree:
+      if obj.type == GIT_OBJ_TREE:
+        result.update(self.snap(cast(Tree, obj), joined(path, tree.name)))
+      elif obj.type == GIT_OBJ_BLOB:
+        result[joined(path, joined(tree.name, obj.name))] = None
+
+    return result
+
+  def touch(self):
+    def elapsed(value: float) -> str:
+      return '{} с'.format(locale.format_string('%.4f', value))
+
+    head: Object
+    files: dict
+    started = process_time()
+
+    if self.args.revspec is not None:
+      revs = self.revparse(self.args.revspec)
+      if self.args.single_rev:
+        revs = self.single_rev(revs.to_object if revs.to_object is not None else revs.from_object)
+      if revs.to_object is not None:
+        files = self.diff_files(revs)
+        head = revs.to_object
+      else:
+        head = revs.from_object
+        files = self.snap(self[head.id].tree)
+    else:
+      head = self[self.head.target]
+      if self.args.single_rev:
+        files = self.diff_files(self.single_rev(head))
+      else:
+        files = self.snap(cast(Commit, head).tree)
+
+    fileCommitCount = FileDates().update(files, self, head)
+
+    dirs = {}
+    dirCommitCount = 0
+    if self.args.touch_dirs:
+      for file in files:
+        for parent in ParentPaths(file):
+          path = parent + '/'
+          if path in dirs:
+            break
+          dirs[path] = None
+      dirCommitCount = DirDates().update(dirs, self, head)
+
+    fileCount = len(files)
+    files.update(dirs)
+
+    scanned = process_time()
+    finished = 0
+
+    if not self.args.dry_run or not (self.args.only_stats or self.args.quiet):
+      for file in sorted(files.keys()):
+        dt = cast(datetime, files[file])
+        if not self.args.dry_run:
+          ts = dt.timestamp()
+          os.utime(file, (ts, ts))
+        if not (self.args.only_stats or self.args.quiet):
+          print('{}  →  {}'.format(file, dt.strftime('%x %X %z')))
+      finished = process_time()
+
+    if not self.args.quiet:
+      if not self.args.only_stats:
+        print()
+      stats = ['Файлов: {}'.format(fileCount)]
+      if self.args.touch_dirs:
+        stats.append('Каталогов: {}'.format(len(dirs)))
+      stats.append('Фиксаций: {}'.format(
+        '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else '{}'.format(fileCommitCount)
+      ))
+      if finished:
+        stats.append('{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)))
+      else:
+        stats.append(elapsed(scanned - started))
+      print(' · '.join(stats))
+
+if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
+  sys.tracebacklimit = 0
+
+locale.setlocale(locale.LC_ALL, '')
+Target(CommandLine().parse(), os.getcwd()).touch() # путь для сообщения в исключении
