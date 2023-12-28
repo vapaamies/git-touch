@@ -33,6 +33,7 @@ class CommandLine(argparse.ArgumentParser):
     self.add_argument('-1', dest='single_rev', action='store_true', help='одиночная фиксация из заданной ревизии')
     self.add_argument('-D', '--only-dirs', dest='touch_dirs', action='store_const', const=2, default=1, help='устанавливать только даты каталогов')
     self.add_argument('-d', '--touch-dirs', type=int, choices=range(2), default=1, help='устанавливать даты каталогов')
+    self.add_argument('-f', '--force', action='store_true', help='безусловно устанавливать даты каталогов')
     self.add_argument('-h', '--help', action='store_true', help='показать эту справку и выйти')
     self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы и каталоги, только отобразить даты')
     self.add_argument('-q', '--quiet', action='store_true', help='ничего не выводить в консоль')
@@ -134,20 +135,20 @@ class Target(Touchable):
     files = {}
     dirs = {}
 
-    head = self[revs.to_object.id].tree
-    feet = self[revs.from_object.id].tree
+    head = self[revs.to_object.id]
+    feet = self[revs.from_object.id]
 
     for diff in self.diff(revs.from_object, revs.to_object).deltas:
       if diff.status_char() != 'D':
         file = diff.new_file.path
-        if file in head:
+        if file in head.tree:
           files[file] = None
           if self.args.touch_dirs:
             for parent in ParentPaths(file):
               path = parent + '/'
               if path in dirs:
                 break
-              if path not in feet:
+              if path not in feet.tree and (self.args.force or int(os.stat(parent).st_mtime) > feet.author.time):
                 dirs[path] = None
 
     return files, dirs
