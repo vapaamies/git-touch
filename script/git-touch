@@ -71,8 +71,10 @@ class Dates:
     pass
 
   def update(self, paths: dict, repo: Touchable, head: Object) -> int:
-    result = 0
     remaining = len(paths)
+    if not remaining:
+      return 0
+    result = 0
 
     for commit in repo.walk(head.id, GIT_SORT_TOPOLOGICAL | (GIT_SORT_TIME | GIT_SORT_REVERSE if self._reverse else 0)):
       result += 1
@@ -125,20 +127,27 @@ class Target(Touchable):
   def single_rev(self, head: Object) -> RevSpec:
     return self.revparse('{0}~1..{0}'.format(head.id)) if self[head.id].parents else self.revparse(head.short_id)
 
-  def diff_files(self, revs: RevSpec) -> dict:
-    result = {}
+  def diff_paths(self, revs: RevSpec) -> (dict, dict):
+    files = {}
+    dirs = {}
+
+    head = self[revs.to_object.id].tree
+    feet = self[revs.from_object.id].tree
 
     for diff in self.diff(revs.from_object, revs.to_object).deltas:
       if diff.status_char() != 'D':
         file = diff.new_file.path
-        result[file] = None
+        if file in head:
+          files[file] = None
+          if self.args.touch_dirs:
+            for parent in ParentPaths(file):
+              path = parent + '/'
+              if path in dirs:
+                break
+              if path not in feet:
+                dirs[path] = None
 
-    actual = self.snap(self[revs.to_object.id].tree)
-    for file in result.keys():
-      if file not in actual:
-        del result[file]
-
-    return result
+    return files, dirs
 
   def snap(self, tree: Tree, path: str = None) -> dict:
     def joined(path: str, name: str) -> str:
@@ -155,11 +164,24 @@ class Target(Touchable):
     return result
 
   def touch(self):
+    def snap(commit: Commit) -> (dict, dict):
+      files = self.snap(commit.tree)
+      dirs = {}
+      if self.args.touch_dirs:
+        for file in files:
+          for parent in ParentPaths(file):
+            path = parent + '/'
+            if path in dirs:
+              break
+            dirs[path] = None
+      return files, dirs
+
     def elapsed(value: float) -> str:
       return '{} с'.format(locale.format_string('%.4f', value))
 
     head: Object
     files: dict
+    dirs: dict
     started = process_time()
 
     if self.args.revspec is not None:
@@ -167,30 +189,20 @@ class Target(Touchable):
       if self.args.single_rev:
         revs = self.single_rev(revs.to_object if revs.to_object is not None else revs.from_object)
       if revs.to_object is not None:
-        files = self.diff_files(revs)
+        (files, dirs) = self.diff_paths(revs)
         head = revs.to_object
       else:
         head = revs.from_object
-        files = self.snap(self[head.id].tree)
+        (files, dirs) = snap(self[head.id])
     else:
       head = self[self.head.target]
       if self.args.single_rev:
-        files = self.diff_files(self.single_rev(head))
+        (files, dirs) = self.diff_paths(self.single_rev(head))
       else:
-        files = self.snap(cast(Commit, head).tree)
+        (files, dirs) = snap(cast(Commit, head))
 
     fileCommitCount = FileDates().update(files, self, head)
-
-    dirs = {}
-    dirCommitCount = 0
-    if self.args.touch_dirs:
-      for file in files:
-        for parent in ParentPaths(file):
-          path = parent + '/'
-          if path in dirs:
-            break
-          dirs[path] = None
-      dirCommitCount = DirDates().update(dirs, self, head)
+    dirCommitCount = DirDates().update(dirs, self, head) if self.args.touch_dirs and len(dirs) else 0
 
     fileCount = len(files)
     files.update(dirs)
