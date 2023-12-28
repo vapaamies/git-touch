@@ -31,6 +31,7 @@ class CommandLine(argparse.ArgumentParser):
       formatter_class=argparse.RawDescriptionHelpFormatter)
     self.add_argument('revspec', nargs='?', metavar='<диапазон-ревизий>', help='введите `git help gitrevisions` для справки')
     self.add_argument('-1', dest='single_rev', action='store_true', help='одиночная фиксация из заданной ревизии')
+    self.add_argument('-D', '--only-dirs', dest='touch_dirs', action='store_const', const=2, default=1, help='устанавливать только даты каталогов')
     self.add_argument('-d', '--touch-dirs', type=int, choices=range(2), default=1, help='устанавливать даты каталогов')
     self.add_argument('-h', '--help', action='store_true', help='показать эту справку и выйти')
     self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы и каталоги, только отобразить даты')
@@ -203,11 +204,15 @@ class Target(Touchable):
       else:
         (files, dirs) = snap(cast(Commit, head))
 
-    fileCommitCount = FileDates().update(files, self, head)
+    fileCommitCount = 0 if self.args.touch_dirs == 2 else FileDates().update(files, self, head)
     dirCommitCount = DirDates().update(dirs, self, head) if self.args.touch_dirs and len(dirs) else 0
 
-    fileCount = len(files)
-    files.update(dirs)
+    fileCount = 0
+    if self.args.touch_dirs == 2:
+      files = dirs
+    else:
+      fileCount = len(files)
+      files.update(dirs)
 
     scanned = process_time()
     finished = 0
@@ -230,16 +235,20 @@ class Target(Touchable):
     if not self.args.quiet:
       if not self.args.only_stats:
         print()
-      stats = ['Файлов: {}'.format(fileCount)]
+      stats = []
+      if self.args.touch_dirs != 2:
+        stats.append('Файлов: {}'.format(fileCount))
       if self.args.touch_dirs:
         stats.append('Каталогов: {}'.format(len(dirs)))
       stats.append('Фиксаций: {}'.format(
-        '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else '{}'.format(fileCommitCount)
+        '{}'.format(dirCommitCount) if self.args.touch_dirs == 2 else
+        '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else
+        '{}'.format(fileCommitCount)
       ))
-      if finished:
-        stats.append('{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)))
-      else:
-        stats.append(elapsed(scanned - started))
+      stats.append(
+        '{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)) if finished else
+        elapsed(scanned - started)
+      )
       print(' · '.join(stats))
 
 if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
