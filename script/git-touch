@@ -32,11 +32,13 @@ class CommandLine(argparse.ArgumentParser):
     self.add_argument('revspec', nargs='?', metavar='<диапазон-ревизий>', help='введите `git help gitrevisions` для справки')
     self.add_argument('-1', dest='single_rev', action='store_true', help='одиночная фиксация из заданной ревизии')
     self.add_argument('-d', '--touch-dirs', type=int, choices=range(2), default=1, help='устанавливать даты каталогов')
-    self.add_argument('-h', '--help', action='store_true', help='вывести эту справку и выйти')
-    self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы, только отобразить даты')
+    self.add_argument('-h', '--help', action='store_true', help='показать эту справку и выйти')
+    self.add_argument('-n', '--dry-run', action='store_true', help='не трогать файлы и каталоги, только отобразить даты')
     self.add_argument('-q', '--quiet', action='store_true', help='ничего не выводить в консоль')
-    self.add_argument('-s', '--only-stats', action='store_true', help="не отображать информацию о файлах/каталогах, только итоговую статистику")
-    self.add_argument('-v', '--version', action='version', version='{} {}'.format(os.path.basename(sys.argv[0]), _version))
+    self.add_argument('-s', '--only-stats', action='store_true', help="не отображать информацию о файлах и каталогах, только итоговую статистику")
+    self.add_argument('-V', '--verbose', action='store_true', help='выводить подробные даты фиксаций')
+    self.add_argument('-v', '--version', action='version', help='показать номер версии и выйти',
+      version='{} {}'.format(os.path.basename(sys.argv[0]), _version))
 
   def parse(self) -> argparse.Namespace:
     args = self.parse_args()
@@ -67,7 +69,7 @@ class Dates:
     self._reverse = reverse
     self._who = who
 
-  def _update(self, paths: dict, file: str, date: datetime) -> int:
+  def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     pass
 
   def update(self, paths: dict, repo: Touchable, head: Object) -> int:
@@ -85,12 +87,12 @@ class Dates:
         for parent in commit.parents:
           for diff in repo.diff(parent, commit).deltas:
             if diff.status_char() != 'D':
-              remaining -= self._update(paths, diff.new_file.path, date)
+              remaining -= self._update(paths, diff.new_file.path, commit.short_id, date)
               if remaining <= 0:
                 return result
       else:
         for file in repo.snap(commit.tree):
-          remaining -= self._update(paths, file, date)
+          remaining -= self._update(paths, file, commit.short_id, date)
           if remaining <= 0:
             return result
 
@@ -98,14 +100,14 @@ class DirDates(Dates):
   def __init__(self):
     super().__init__(True, 'author')
 
-  def _update(self, paths: dict, file: str, date: datetime) -> int:
+  def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     result = 0
     for parent in ParentPaths(file):
       path = parent + '/'
       if path not in paths:
         break
       if paths[path] is None:
-        paths[path] = date
+        paths[path] = (commit, date)
         result += 1
     return result
 
@@ -113,9 +115,9 @@ class FileDates(Dates):
   def __init__(self):
     super().__init__(False, 'committer')
 
-  def _update(self, paths: dict, file: str, date: datetime) -> int:
+  def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     if file in paths and paths[file] is None:
-      paths[file] = date
+      paths[file] = (commit, date)
       return 1
     return 0
 
@@ -211,13 +213,18 @@ class Target(Touchable):
     finished = 0
 
     if not self.args.dry_run or not (self.args.only_stats or self.args.quiet):
-      for file in sorted(files.keys()):
-        dt = cast(datetime, files[file])
+      for file in sorted(files.keys(), key=str.casefold):
+        info = files[file]
+        dt = cast(datetime, info[1])
         if not self.args.dry_run:
           ts = dt.timestamp()
           os.utime(file, (ts, ts))
         if not (self.args.only_stats or self.args.quiet):
-          print('{}  →  {}'.format(file, dt.strftime('%x %X %z')))
+          print(
+            '{}  →  {}  ({}  ←  {})'.format(file, dt.astimezone().strftime('%x %X %z'), dt.strftime('%x %X %z'), info[0])
+              if self.args.verbose else
+            '{}  →  {}  ({})'.format(file, dt.astimezone().strftime('%x %X'), info[0])
+          )
       finished = process_time()
 
     if not self.args.quiet:
