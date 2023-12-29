@@ -222,7 +222,7 @@ class Target(Touchable):
       for file in sorted(files.keys(), key=str.casefold):
         info = files[file]
         dt = cast(datetime, info[1])
-        if not self.args.dry_run:
+        if not self.args.dry_run and os.path.exists(file):
           ts = dt.timestamp()
           os.utime(file, (ts, ts))
         if not (self.args.only_stats or self.args.quiet):
