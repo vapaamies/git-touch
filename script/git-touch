@@ -12,6 +12,7 @@ import sys
 import os
 from time import process_time
 import argparse
+import concurrent.futures
 
 from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
 from pygit2 import GIT_SORT_TOPOLOGICAL, GIT_SORT_TIME, GIT_SORT_REVERSE
@@ -124,6 +125,9 @@ class FileDates(Dates):
     return 0
 
 class Target(Touchable):
+  fileCommitCount: int
+  dirCommitCount: int
+
   def __init__(self, args: argparse.Namespace, path: str):
     super().__init__(path)
     self.args = args
@@ -205,15 +209,30 @@ class Target(Touchable):
       else:
         (files, dirs) = snap(cast(Commit, head))
 
-    fileCommitCount = 0 if self.args.touch_dirs == 2 else FileDates().update(files, self, head)
-    dirCommitCount = DirDates().update(dirs, self, head) if self.args.touch_dirs and len(dirs) else 0
+    self.fileCommitCount = 0
+    self.dirCommitCount = 0
 
-    fileCount = 0
-    if self.args.touch_dirs == 2:
-      files = dirs
+    if self.args.touch_dirs and len(dirs):
+      if self.args.touch_dirs == 2:
+        self.dirCommitCount = DirDates().update(dirs, self, head)
+      else:
+        def update(dates: Dates, paths: dict):
+          return dates.update(paths, self, head)
+        def done_files(future: concurrent.futures.Future):
+          self.fileCommitCount = future.result()
+        def done_dirs(future: concurrent.futures.Future):
+          self.dirCommitCount = future.result()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+          filesThread = executor.submit(update, FileDates(), files)
+          filesThread.add_done_callback(done_files)
+          dirsThread = executor.submit(update, DirDates(), dirs)
+          dirsThread.add_done_callback(done_dirs)
+          concurrent.futures.as_completed([filesThread, dirsThread])
     else:
-      fileCount = len(files)
-      files.update(dirs)
+      self.fileCommitCount = FileDates().update(files, self, head)
+
+    fileCount = len(files)
+    files.update(dirs)
 
     scanned = process_time()
     finished = 0
@@ -242,9 +261,9 @@ class Target(Touchable):
       if self.args.touch_dirs:
         stats.append('Каталогов: {}'.format(len(dirs)))
       stats.append('Фиксаций: {}'.format(
-        '{}'.format(dirCommitCount) if self.args.touch_dirs == 2 else
-        '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else
-        '{}'.format(fileCommitCount)
+        '{}'.format(self.dirCommitCount) if self.args.touch_dirs == 2 else
+        '{}:{}'.format(self.fileCommitCount, self.dirCommitCount) if self.args.touch_dirs else
+        '{}'.format(self.fileCommitCount)
       ))
       stats.append(
         '{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)) if finished else
