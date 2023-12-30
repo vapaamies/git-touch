@@ -13,6 +13,7 @@ import os
 from time import process_time
 import argparse
 import concurrent.futures
+import multiprocessing
 
 from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
 from pygit2 import GIT_SORT_TOPOLOGICAL, GIT_SORT_TIME, GIT_SORT_REVERSE
@@ -222,7 +223,7 @@ class Target(Touchable):
           self.fileCommitCount = future.result()
         def done_dirs(future: concurrent.futures.Future):
           self.dirCommitCount = future.result()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
           filesThread = executor.submit(update, FileDates(), files)
           filesThread.add_done_callback(done_files)
           dirsThread = executor.submit(update, DirDates(), dirs)
@@ -271,8 +272,9 @@ class Target(Touchable):
       )
       print(' · '.join(stats))
 
-if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
-  sys.tracebacklimit = 0
+if __name__ == '__main__':
+  if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
+    sys.tracebacklimit = 0
 
-locale.setlocale(locale.LC_ALL, '')
-Target(CommandLine().parse(), os.getcwd()).touch() # путь для сообщения в исключении
+  locale.setlocale(locale.LC_ALL, '')
+  Target(CommandLine().parse(), os.getcwd()).touch() # путь для сообщения в исключении
