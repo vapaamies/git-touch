@@ -12,6 +12,8 @@ import sys
 import os
 from time import process_time
 import argparse
+from queue import Queue
+from threading import Thread
 
 from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
 from pygit2 import GIT_SORT_TOPOLOGICAL, GIT_SORT_TIME, GIT_SORT_REVERSE
@@ -66,41 +68,58 @@ class Touchable(Repository):
   def snap(self, tree: Tree, path: str = None) -> dict:
     pass
 
-class Dates:
-  def __init__(self, reverse: bool, who: str):
+class Dates(Thread):
+  _paths: dict
+  _repo: Touchable
+  _head: Object
+  _queue: Queue
+  result = 0
+
+  def __init__(self, reverse: bool, who: str, queue: Queue):
+    super().__init__()
     self._reverse = reverse
     self._who = who
+    self._queue = queue
 
   def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     pass
 
-  def update(self, paths: dict, repo: Touchable, head: Object) -> int:
-    remaining = len(paths)
+  def run(self):
+    if not self.result and self._queue is not None:
+      self._queue.get()
+      self.update()
+      self._queue.task_done()
+
+  def update(self) -> int:
+    self.result = 0
+    remaining = len(self._paths)
     if not remaining:
       return 0
-    result = 0
 
-    for commit in repo.walk(head.id, GIT_SORT_TOPOLOGICAL | (GIT_SORT_TIME | GIT_SORT_REVERSE if self._reverse else 0)):
-      result += 1
+    for commit in self._repo.walk(self._head.id, GIT_SORT_TOPOLOGICAL | (GIT_SORT_TIME | GIT_SORT_REVERSE if self._reverse else 0)):
+      self.result += 1
       src = cast(Signature, getattr(commit, self._who))
       date = datetime.fromtimestamp(src.time, timezone(timedelta(minutes=src.offset)))
 
       if commit.parents:
         for parent in commit.parents:
-          for diff in repo.diff(parent, commit).deltas:
+          for diff in self._repo.diff(parent, commit).deltas:
             if diff.status_char() != 'D':
-              remaining -= self._update(paths, diff.new_file.path, commit.short_id, date)
+              remaining -= self._update(self._paths, diff.new_file.path, commit.short_id, date)
               if remaining <= 0:
-                return result
+                return self.result
       else:
-        for file in repo.snap(commit.tree):
-          remaining -= self._update(paths, file, commit.short_id, date)
+        for file in self._repo.snap(commit.tree):
+          remaining -= self._update(self._paths, file, commit.short_id, date)
           if remaining <= 0:
-            return result
+            return self.result
 
 class DirDates(Dates):
-  def __init__(self):
-    super().__init__(True, 'author')
+  def __init__(self, paths: dict, repo: Touchable, head: Object, queue: Queue = None):
+    super().__init__(True, 'author', queue)
+    self._paths = paths
+    self._repo = repo
+    self._head = head
 
   def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     result = 0
@@ -114,8 +133,11 @@ class DirDates(Dates):
     return result
 
 class FileDates(Dates):
-  def __init__(self):
-    super().__init__(False, 'committer')
+  def __init__(self, paths: dict, repo: Touchable, head: Object, queue: Queue = None):
+    super().__init__(False, 'committer', queue)
+    self._paths = paths
+    self._repo = repo
+    self._head = head
 
   def _update(self, paths: dict, file: str, commit: str, date: datetime) -> int:
     if file in paths and paths[file] is None:
@@ -205,20 +227,38 @@ class Target(Touchable):
       else:
         (files, dirs) = snap(cast(Commit, head))
 
-    fileCommitCount = 0 if self.args.touch_dirs == 2 else FileDates().update(files, self, head)
-    dirCommitCount = DirDates().update(dirs, self, head) if self.args.touch_dirs and len(dirs) else 0
+    fileCommitCount = 0
+    dirCommitCount = 0
 
-    fileCount = 0
-    if self.args.touch_dirs == 2:
-      files = dirs
+    if self.args.touch_dirs and len(dirs):
+      if self.args.touch_dirs == 2:
+        dirCommitCount = DirDates(dirs, self, head).update()
+      else:
+        queue = Queue()
+        filesThread = FileDates(files, self, head, queue)
+        dirsThread = DirDates(dirs, self, head, queue)
+        for thread in ([filesThread, dirsThread]):
+          thread.daemon = True
+          thread.start()
+        queue.put(None)
+        queue.put(None)
+        queue.join()
+        fileCommitCount = filesThread.result
+        dirCommitCount = dirsThread.result
     else:
-      fileCount = len(files)
-      files.update(dirs)
+      fileCommitCount = FileDates(files, self, head).update()
 
     scanned = process_time()
     finished = 0
+    fileCount = 0
 
     if not self.args.dry_run or not (self.args.only_stats or self.args.quiet):
+      if self.args.touch_dirs == 2:
+        files = dirs
+      else:
+        fileCount = len(files)
+        files.update(dirs)
+
       for file in sorted(files.keys(), key=str.casefold):
         info = files[file]
         dt = cast(datetime, info[1])
