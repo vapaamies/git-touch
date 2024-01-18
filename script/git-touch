@@ -10,7 +10,7 @@ from typing import cast
 import locale
 import sys
 import os
-from time import process_time
+from time import process_time_ns
 import argparse
 
 from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
@@ -23,7 +23,7 @@ _description = '''
   • каталоги — дата первого появления в Git (authored date первой фиксации)
 '''.strip()
 _epilog = 'Команды Git: http://gitcommands.cantor.systems'
-_version = '2023.12'
+_version = '2024.1'
 
 class Arguments(argparse.Namespace):
   dry_run: bool
@@ -222,7 +222,7 @@ class Target(Touchable):
 
     head: Commit
     paths: dict
-    started = process_time()
+    started = process_time_ns()
 
     if self.args.rev_spec is not None:
       revs = self.revparse(self.args.rev_spec)
@@ -265,7 +265,7 @@ class Target(Touchable):
       dirCount = 0
       dirCommitCount = 0
 
-    scanned = process_time()
+    scanned = process_time_ns()
     finished = 0
 
     if not self.args.dry_run or not (self.args.only_stats or self.args.quiet):
@@ -283,7 +283,7 @@ class Target(Touchable):
               if self.args.verbose else
             '{}  →  {}  ({})'.format(file, dt.astimezone().strftime('%x %X'), info[0])
           )
-      finished = process_time()
+      finished = process_time_ns()
 
     if not self.args.quiet:
       if not self.args.only_stats:
@@ -298,8 +298,8 @@ class Target(Touchable):
         '{}:{}'.format(fileCommitCount, dirCommitCount) if self.args.touch_dirs else
         '{}'.format(fileCommitCount)
       ))
-      def elapsed(value: float) -> str:
-        return '{} с'.format(locale.format_string('%.4f', value))
+      def elapsed(value: int) -> str:
+        return '{} с'.format(locale.format_string('%.4f', value * 1e-9))
       stats.append(
         '{} ({})'.format(elapsed(finished - started), elapsed(scanned - started)) if finished else
         elapsed(scanned - started)
