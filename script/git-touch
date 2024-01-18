@@ -10,7 +10,7 @@ from typing import cast
 import locale
 import sys
 import os
-from time import process_time_ns
+from time import process_time_ns, time
 import argparse
 
 from pygit2 import Commit, Object, Repository, RevSpec, Signature, Tree
@@ -275,8 +275,7 @@ class Target(Touchable):
           continue
         dt = cast(datetime, info[1])
         if not self.args.dry_run:
-          ts = dt.timestamp()
-          os.utime(file, (ts, ts))
+          os.utime(file, (time(), dt.timestamp()))
         if not (self.args.only_stats or self.args.quiet):
           print(
             '{}  →  {}  ({}  ←  {})'.format(file, dt.astimezone().strftime('%x %X %z'), dt.strftime('%x %X %z'), info[0])
