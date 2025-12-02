@@ -1,0 +1,81 @@
+#!/usr/bin/env python
+
+"""
+    Copyright © 2025 Владислав Джавадов (Vladislav Javadov)
+    http://git-touch.cantorsys.com
+"""
+
+from datetime import datetime, timedelta, timezone
+from typing import cast
+import locale
+import sys
+import os
+from time import process_time_ns, time
+import argparse
+
+_description = '''
+Sets file and directory dates to commit dates:
+  • files – last committer date
+  • directories – first author date (first appearance in Git by parent commits order)
+'''.strip()
+_installation = '''
+Use bundled samples if you do not have own hooks:
+  git config core.hooksPath "{}"
+'''.strip()
+_epilog = '''
+Needed before first use of hook:
+  {} --force
+'''.strip()
+_version = '2025.12'
+
+class Arguments(argparse.Namespace):
+  abbrev: str
+  dry_run: bool
+  force: bool
+  merges: str
+  only_dirs: bool
+  only_stats: bool
+  quiet: bool
+  rev_spec: str
+  single_rev: bool
+  touch_dirs: bool
+  verbose: bool
+
+class CommandLine(argparse.ArgumentParser):
+  def __init__(self):
+    cmd = os.path.basename(sys.argv[0])
+    gitc = cmd.replace('-', ' ', 1)
+    hook_samples = os.path.normpath(os.path.join(os.path.dirname(sys.argv[0]), '..', 'hook-samples'))
+
+    super().__init__(add_help=False, prog=gitc, description=_description,
+      epilog='\n\n'.join([_installation.format(hook_samples) if os.path.isdir(hook_samples) else '', _epilog.format(gitc)]),
+      formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(prog, max_help_position=28)
+    )
+    self.add_argument('rev_spec', nargs='?', metavar='<revision-range>', help='type `git help gitrevisions` for help')
+    self.add_argument('-1', dest='single_rev', action='store_true', help='take just one commit from given revision(s)')
+    self.add_argument('--abbrev', metavar='<n>', type=str, choices=[str(a) for a in (range(41))] + ['auto', 'yes', 'no'],
+                                                                   # ^--- просто list[str](range(41) в Python 3.12
+                      help='Show only first <n> characters of commit hash { 0..40 | auto | yes | no }')
+    self.add_argument('-D', '--only-dirs', action='store_true', help='touch only directories')
+    self.add_argument('-d', '--touch-dirs', metavar='<d>', type=int, choices=range(2), default=1, help='touch directories too { 0 | 1 }')
+    self.add_argument('-f', '--force', action='store_true', help='do not skip directories with dates earlier than last author date')
+    self.add_argument('-h', '--help', action='help', help='display this help and exit')
+    self.add_argument('-m', '--merges', metavar='<s>', type=str, choices=['A', 'M', 'AM', 'MA'],
+                      help='do not skip merge commits, take these <s> statuses { A | M | AM | MA }')
+    self.add_argument('-n', '--dry-run', action='store_true', help='do not touch files and directories, only display dates')
+    self.add_argument('-q', '--quiet', action='store_true', help='output nothing to the console')
+    self.add_argument('-s', '--only-stats', action='store_true', help="do not display information about files and directories, only totals")
+    self.add_argument('-V', '--verbose', action='store_true', help='display timezones along with dates')
+    self.add_argument('-v', '--version', action='version', help='display version and exit', version='{} {}'.format(cmd, _version))
+
+  def parse(self) -> Arguments:
+    args = cast(Arguments, self.parse_args())
+    args.touch_dirs += args.only_dirs
+    return args
+
+if not os.path.exists(os.path.join(os.path.dirname(sys.argv[0]), '../.git')):
+  sys.tracebacklimit = 0
+
+locale.setlocale(locale.LC_ALL, '')
+# Target(CommandLine().parse(), os.getcwd()).touch() # путь для сообщения в исключении
+CommandLine().parse()
