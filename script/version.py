@@ -2,7 +2,7 @@
 
 """
     Copyright © 2026 Владислав Джавадов (Vladislav Javadov)
-    Distributed under terms of BSD license: http://git-touch.cantorsys.com/license
+    Distributed under terms of BSD license: http://touch.cantorsys.com/license
 """
 
 from fnmatch import fnmatchcase
